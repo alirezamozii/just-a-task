@@ -1,0 +1,10 @@
+task downloadFont {
+    doLast {
+        def dest = file("app/src/main/res/font/vazirmatn.ttf")
+        dest.parentFile.mkdirs()
+        new URL("https://github.com/rastikerdar/vazirmatn/raw/master/fonts/ttf/Vazirmatn-Regular.ttf").withInputStream { i -> dest.withOutputStream { it << i } }
+        
+        def destBold = file("app/src/main/res/font/vazirmatn_bold.ttf")
+        new URL("https://github.com/rastikerdar/vazirmatn/raw/master/fonts/ttf/Vazirmatn-Bold.ttf").withInputStream { i -> destBold.withOutputStream { it << i } }
+    }
+}
