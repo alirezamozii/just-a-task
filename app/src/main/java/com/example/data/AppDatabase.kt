@@ -5,10 +5,11 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Database(entities = [Task::class, ChatMessage::class], version = 3, exportSchema = false)
+@Database(entities = [Task::class, ChatMessage::class, NotificationEntity::class], version = 5, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun taskDao(): TaskDao
     abstract fun chatMessageDao(): ChatMessageDao
+    abstract fun notificationDao(): NotificationDao
 
     companion object {
         @Volatile

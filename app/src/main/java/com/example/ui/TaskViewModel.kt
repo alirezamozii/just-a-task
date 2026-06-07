@@ -36,6 +36,15 @@ class TaskViewModel(private val repository: TaskRepository) : ViewModel() {
     val chatMessages: StateFlow<List<ChatMessage>> = repository.allMessages
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    // System Notification Dispatch Callback
+    var systemNotificationTrigger: ((title: String, body: String) -> Unit)? = null
+
+    val allNotifications: StateFlow<List<com.example.data.NotificationEntity>> = repository.allNotifications
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val unreadNotificationsCount: StateFlow<Int> = repository.unreadNotificationsCount
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
     // UI-side filters and sorting options states
     private val _sortMode = MutableStateFlow(SortMode.DEADLINE_SOONEST)
     val sortMode: StateFlow<SortMode> = _sortMode.asStateFlow()
@@ -49,6 +58,9 @@ class TaskViewModel(private val repository: TaskRepository) : ViewModel() {
 
     private val _uiError = MutableStateFlow<String?>(null)
     val uiError: StateFlow<String?> = _uiError.asStateFlow()
+
+    private val _pendingCommands = MutableStateFlow<List<com.example.network.TaskCommand>?>(null)
+    val pendingCommands: StateFlow<List<com.example.network.TaskCommand>?> = _pendingCommands.asStateFlow()
 
     // COMBINED & processed tasks flow for the Task List UI
     val filteredAndSortedTasks: StateFlow<List<Task>> = combine(
@@ -72,11 +84,11 @@ class TaskViewModel(private val repository: TaskRepository) : ViewModel() {
             }
             SortMode.PRIORITY_HIGHEST -> {
                 // High priority score is highest priority
-                list.sortedByDescending { it.priorityScore }
+                list.sortedByDescending { it.importanceScore + it.urgencyScore }
             }
             SortMode.BALANCE -> {
                 // Balance is priority versus estimated minutes
-                list.sortedByDescending { it.priorityScore.toFloat() / it.estimatedMinutes.coerceAtLeast(1).toFloat() }
+                list.sortedByDescending { (it.importanceScore + it.urgencyScore).toFloat() / it.estimatedMinutes.coerceAtLeast(1).toFloat() }
             }
         }
         list
@@ -102,7 +114,10 @@ class TaskViewModel(private val repository: TaskRepository) : ViewModel() {
             _isGenerating.value = true
             _uiError.value = null
             try {
-                repository.sendChatMessage(text, isChatMode)
+                val (_, commands) = repository.sendChatMessage(text, isChatMode)
+                if (commands.isNotEmpty()) {
+                    _pendingCommands.value = commands
+                }
             } catch (e: Exception) {
                 _uiError.value = e.localizedMessage ?: "Failed to contact Gemini"
                 // Save a temporary failure in user's chat listing for visual cues
@@ -113,11 +128,75 @@ class TaskViewModel(private val repository: TaskRepository) : ViewModel() {
         }
     }
 
+    fun acceptPendingCommands() {
+        val cmds = _pendingCommands.value ?: return
+        _pendingCommands.value = null
+        viewModelScope.launch {
+            repository.executeCommands(cmds)
+        }
+    }
+
+    fun rejectPendingCommands(feedback: String? = null) {
+        _pendingCommands.value = null
+        if (!feedback.isNullOrBlank()) {
+            sendChatMessage("این پیشنهادها رو رد کردم چون: $feedback", true)
+        }
+    }
+
+    // --- NOTIFICATION ACTIONS ---
+
+    fun markNotificationAsRead(id: Int) {
+        viewModelScope.launch {
+            repository.markNotificationAsRead(id)
+        }
+    }
+
+    fun markAllNotificationsAsRead() {
+        viewModelScope.launch {
+            repository.markAllNotificationsAsRead()
+        }
+    }
+
+    fun clearAllNotifications() {
+        viewModelScope.launch {
+            repository.clearAllNotifications()
+        }
+    }
+
+    fun addNotificationToHistoryAndTriggerSystem(title: String, body: String, type: String = "info") {
+        viewModelScope.launch {
+            val entity = com.example.data.NotificationEntity(
+                title = title,
+                body = body,
+                type = type
+            )
+            repository.insertNotification(entity)
+            systemNotificationTrigger?.invoke(title, body)
+        }
+    }
+
+    fun checkUpcomingDeadlines() {
+        viewModelScope.launch {
+            val tasks = allTasks.value
+            val now = System.currentTimeMillis()
+            for (task in tasks) {
+                if (task.status == "Pending" && task.deadline > now && (task.deadline - now) <= 24 * 60 * 60 * 1000) {
+                    addNotificationToHistoryAndTriggerSystem(
+                        title = "⚠️ ددلاین نزدیک است، داشیییی!",
+                        body = "کمتر از ۲۴ ساعت به ددلاین تسک «${task.title}» باقی مانده است. بجنب!",
+                        type = "deadline_near"
+                    )
+                }
+            }
+        }
+    }
+
     fun addTaskManually(
         title: String,
         description: String,
         deadline: Long,
         priority: Int,
+        urgency: Int,
         estimatedMinutes: Int,
         timeEstimateText: String = "",
         reasoning: String = "Created manually by user",
@@ -127,10 +206,11 @@ class TaskViewModel(private val repository: TaskRepository) : ViewModel() {
     ) {
         viewModelScope.launch {
             val task = Task(
-                title = title.ifEmpty { "Manual Task" },
+                title = title.ifEmpty { "تسک دستی" },
                 description = description,
                 deadline = deadline,
-                priorityScore = priority.coerceIn(1, 100),
+                importanceScore = priority.coerceIn(1, 100),
+                urgencyScore = urgency.coerceIn(1, 100),
                 estimatedMinutes = estimatedMinutes,
                 timeEstimateText = timeEstimateText,
                 reasoning = reasoning,
@@ -139,6 +219,11 @@ class TaskViewModel(private val repository: TaskRepository) : ViewModel() {
                 folderName = folderName
             )
             repository.insertTask(task)
+            addNotificationToHistoryAndTriggerSystem(
+                title = "➕ تسک جدید ثبت شد",
+                body = "تسک «${task.title}» با موفقیت به برنامه شما اضافه شد، داشیییی!",
+                type = "info"
+            )
         }
     }
 
@@ -146,6 +231,19 @@ class TaskViewModel(private val repository: TaskRepository) : ViewModel() {
         viewModelScope.launch {
             val nextStatus = if (task.status == "Completed") "Pending" else "Completed"
             repository.updateTask(task.copy(status = nextStatus))
+            if (nextStatus == "Completed") {
+                addNotificationToHistoryAndTriggerSystem(
+                    title = "🎖️ کارت عالی بود داشیییی!",
+                    body = "تسک «${task.title}» با موفقیت تکمیل شد! همین‌جوری ادامه بده ⚡",
+                    type = "high_priority"
+                )
+            } else {
+                addNotificationToHistoryAndTriggerSystem(
+                    title = "↩️ بازگردانی تسک انجام شده",
+                    body = "تسک «${task.title}» دوباره به حالت در جریان قرار گرفت.",
+                    type = "info"
+                )
+            }
         }
     }
 
@@ -163,7 +261,8 @@ class TaskViewModel(private val repository: TaskRepository) : ViewModel() {
             obj.put("title", t.title)
             obj.put("description", t.description)
             obj.put("deadline", t.deadline)
-            obj.put("priorityScore", t.priorityScore)
+            obj.put("importanceScore", t.importanceScore)
+            obj.put("urgencyScore", t.urgencyScore)
             obj.put("estimatedMinutes", t.estimatedMinutes)
             obj.put("status", t.status)
             obj.put("createdAt", t.createdAt)
@@ -185,15 +284,16 @@ class TaskViewModel(private val repository: TaskRepository) : ViewModel() {
                 for (i in 0 until arr.length()) {
                     val obj = arr.getJSONObject(i)
                     val task = Task(
-                        title = obj.optString("title", "Imported Task"),
+                        title = obj.optString("title", "تسک بک‌آپ"),
                         description = obj.optString("description", ""),
                         deadline = obj.optLong("deadline", 0L),
-                        priorityScore = obj.optInt("priorityScore", 50),
+                        importanceScore = obj.optInt("importanceScore", 50),
+                        urgencyScore = obj.optInt("urgencyScore", 50),
                         estimatedMinutes = obj.optInt("estimatedMinutes", 0),
                         status = obj.optString("status", "Pending"),
                         createdAt = obj.optLong("createdAt", System.currentTimeMillis()),
                         timeEstimateText = obj.optString("timeEstimateText", ""),
-                        reasoning = obj.optString("reasoning", "Imported"),
+                        reasoning = obj.optString("reasoning", "بازگردانی شده"),
                         emoji = obj.optString("emoji", "📝"),
                         colorIndex = obj.optInt("colorIndex", 0),
                         folderName = obj.optString("folderName", "").takeIf { it.isNotBlank() },
@@ -201,6 +301,12 @@ class TaskViewModel(private val repository: TaskRepository) : ViewModel() {
                     )
                     repository.insertTask(task)
                 }
+                
+                addNotificationToHistoryAndTriggerSystem(
+                    title = "📥 بازیابی موفق بک‌آپ",
+                    body = "تعداد ${arr.length()} تسک با موفقیت از بک‌آپ بازگردانی شد، داشیییی! ⚡",
+                    type = "info"
+                )
             }
             true
         } catch (e: Exception) {
@@ -245,6 +351,12 @@ class TaskViewModel(private val repository: TaskRepository) : ViewModel() {
                     )
                 )
             }
+        }
+        
+        // Dynamic automatic check for upcoming deadlines upon launch
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(2000) // Let database load
+            checkUpcomingDeadlines()
         }
     }
 }

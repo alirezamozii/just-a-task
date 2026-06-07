@@ -9,7 +9,8 @@ data class Task(
     val title: String,
     val description: String,
     val deadline: Long = 0L, // 0 means no deadline
-    val priorityScore: Int = 50, // 1-100
+    val importanceScore: Int = 50, // 1-100
+    val urgencyScore: Int = 50, // 1-100
     val estimatedMinutes: Int = 0, // replaces effort
     val status: String = "Pending", // "Pending", "Completed"
     val createdAt: Long = System.currentTimeMillis(),

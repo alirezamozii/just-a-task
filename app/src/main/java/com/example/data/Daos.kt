@@ -49,3 +49,28 @@ interface ChatMessageDao {
     @Query("DELETE FROM chat_messages")
     suspend fun clearAllMessages()
 }
+
+@Dao
+interface NotificationDao {
+    @Query("SELECT * FROM in_app_notifications ORDER BY timestamp DESC")
+    fun getAllNotifications(): Flow<List<NotificationEntity>>
+
+    @Query("SELECT COUNT(*) FROM in_app_notifications WHERE isRead = 0")
+    fun getUnreadCountFlow(): Flow<Int>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertNotification(notification: NotificationEntity): Long
+
+    @Query("UPDATE in_app_notifications SET isRead = 1 WHERE id = :id")
+    suspend fun markAsRead(id: Int)
+
+    @Query("UPDATE in_app_notifications SET isRead = 1")
+    suspend fun markAllAsRead()
+
+    @Query("DELETE FROM in_app_notifications WHERE id = :id")
+    suspend fun deleteNotificationById(id: Int)
+
+    @Query("DELETE FROM in_app_notifications")
+    suspend fun clearAllNotifications()
+}
+

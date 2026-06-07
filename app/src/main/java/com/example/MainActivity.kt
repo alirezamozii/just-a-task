@@ -24,8 +24,18 @@ class MainActivity : ComponentActivity() {
 
     // Initialize local database persistence
     val database = AppDatabase.getDatabase(applicationContext)
-    val repository = TaskRepository(database.taskDao(), database.chatMessageDao())
+    val repository = TaskRepository(database.taskDao(), database.chatMessageDao(), database.notificationDao())
     val viewModel = TaskViewModel(repository)
+    
+    // Wire up system notification dispatcher
+    val notificationHelper = com.example.ui.utils.NotificationHelper(applicationContext)
+    viewModel.systemNotificationTrigger = { title, body ->
+        notificationHelper.showSystemNotification(
+            (System.currentTimeMillis() % 100000).toInt(),
+            title,
+            body
+        )
+    }
 
     setContent {
       MyApplicationTheme {

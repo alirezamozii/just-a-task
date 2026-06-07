@@ -5,6 +5,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.shape.CircleShape
@@ -46,10 +47,7 @@ import com.example.ui.TaskViewModel
 import java.text.SimpleDateFormat
 import java.util.*
 
-val VazirmatnFontFamily = FontFamily(
-    Font(com.example.R.font.vazirmatn, FontWeight.Normal),
-    Font(com.example.R.font.vazirmatn_bold, FontWeight.Bold)
-)
+val VazirmatnFontFamily = FontFamily.Default
 
 sealed class AppScreen {
     object Dashboard : AppScreen()
@@ -57,6 +55,7 @@ sealed class AppScreen {
     object Chat : AppScreen()
     object Settings : AppScreen()
     data class AddEdit(val task: Task? = null) : AppScreen()
+    data class TaskDetail(val task: Task) : AppScreen()
 }
 
 // --- COLOR SYSTEM ---
@@ -76,7 +75,7 @@ data class ThemeColors(
 )
 
 val LightTaskColors = listOf(
-    Color(0xFF8E8E93), // 0: Grey
+    Color(0xFFFFFFFF), // 0: White
     Color(0xFFFF3B30), // 1: Red
     Color(0xFFFF9500), // 2: Orange
     Color(0xFFFFCC00), // 3: Yellow
@@ -89,12 +88,12 @@ val LightTaskColors = listOf(
 )
 
 val LightOnTaskColors = listOf(
-    Color.White, Color.White, Color.White, Color.Black, Color.Black, 
+    Color.Black, Color.White, Color.White, Color.Black, Color.Black, 
     Color.Black, Color.White, Color.White, Color.Black, Color.White
 )
 
 val DarkTaskColors = listOf(
-    Color(0xFF8E8E93), // 0: Grey
+    Color(0xFFFFFFFF), // 0: White
     Color(0xFFFF3B30), // 1: Red
     Color(0xFFFF9500), // 2: Orange
     Color(0xFFFFCC00), // 3: Yellow
@@ -107,7 +106,7 @@ val DarkTaskColors = listOf(
 )
 
 val DarkOnTaskColors = listOf(
-    Color.White, Color.White, Color.White, Color.Black, Color.Black, 
+    Color.Black, Color.White, Color.White, Color.Black, Color.Black, 
     Color.Black, Color.White, Color.White, Color.Black, Color.White
 )
 
@@ -150,6 +149,24 @@ fun MainScreen(viewModel: TaskViewModel, modifier: Modifier = Modifier) {
 
     var currentScreen by remember { mutableStateOf<AppScreen>(AppScreen.Dashboard) }
 
+    val context = LocalContext.current
+    val vazirmatnFontFamily = remember(context) {
+        try {
+            val regular = androidx.core.content.res.ResourcesCompat.getFont(context, com.example.R.font.vazirmatn)
+            val bold = androidx.core.content.res.ResourcesCompat.getFont(context, com.example.R.font.vazirmatn_bold)
+            if (regular != null && bold != null) {
+                FontFamily(
+                    Font(com.example.R.font.vazirmatn, FontWeight.Normal),
+                    Font(com.example.R.font.vazirmatn_bold, FontWeight.Bold)
+                )
+            } else {
+                FontFamily.Default
+            }
+        } catch (e: Throwable) {
+            FontFamily.Default
+        }
+    }
+
     BackHandler(enabled = currentScreen != AppScreen.Dashboard) {
         currentScreen = AppScreen.Dashboard
     }
@@ -157,7 +174,7 @@ fun MainScreen(viewModel: TaskViewModel, modifier: Modifier = Modifier) {
     CompositionLocalProvider(
         LocalLayoutDirection provides LayoutDirection.Rtl
     ) {
-        ProvideTextStyle(value = androidx.compose.ui.text.TextStyle(fontFamily = VazirmatnFontFamily)) {
+        ProvideTextStyle(value = androidx.compose.ui.text.TextStyle(fontFamily = vazirmatnFontFamily)) {
             Box(
                 modifier = modifier
                     .fillMaxSize()
@@ -178,11 +195,12 @@ fun MainScreen(viewModel: TaskViewModel, modifier: Modifier = Modifier) {
                     is AppScreen.Chat -> ChatScreen(viewModel, colors, onBack = { currentScreen = AppScreen.Dashboard })
                     is AppScreen.Settings -> SettingsScreen(viewModel, colors, isDarkMode, { isDarkMode = it }, { currentScreen = AppScreen.Dashboard })
                     is AppScreen.AddEdit -> AddEditScreen(screen.task, viewModel, colors) { currentScreen = AppScreen.Dashboard }
+                    is AppScreen.TaskDetail -> TaskDetailScreen(screen.task, viewModel, colors, { currentScreen = AppScreen.Dashboard }, { currentScreen = AppScreen.AddEdit(screen.task) })
                 }
             }
 
             // FLOATING DOCK (Navigation Bar)
-            if (currentScreen !is AppScreen.AddEdit) {
+            if (currentScreen !is AppScreen.AddEdit && currentScreen !is AppScreen.TaskDetail) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize(),
@@ -194,6 +212,89 @@ fun MainScreen(viewModel: TaskViewModel, modifier: Modifier = Modifier) {
                         onNavigate = { currentScreen = it }
                     )
                 }
+            }
+            
+            // PENDING AI ACTIONS CONFIRMATION
+            var isRejecting by remember { mutableStateOf(false) }
+            var rejectFeedback by remember { mutableStateOf("") }
+            val pendingCommands by viewModel.pendingCommands.collectAsStateWithLifecycle()
+            if (pendingCommands != null && pendingCommands!!.isNotEmpty()) {
+                if (isRejecting) {
+                    androidx.compose.material3.AlertDialog(
+                        onDismissRequest = { viewModel.rejectPendingCommands(); isRejecting = false },
+                        containerColor = colors.surface,
+                        titleContentColor = colors.textPrimary,
+                        textContentColor = colors.textSecondary,
+                        title = { Text("چرا رد شدن؟ (اختیاری)", fontWeight = FontWeight.Bold) },
+                        text = {
+                            androidx.compose.material3.OutlinedTextField(
+                                value = rejectFeedback,
+                                onValueChange = { rejectFeedback = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                placeholder = { Text("مثلا: دو تا تسک اول اضافه بودن...") },
+                                colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = colors.accent,
+                                    unfocusedBorderColor = colors.textSecondary.copy(alpha=0.5f),
+                                    focusedTextColor = colors.textPrimary,
+                                    unfocusedTextColor = colors.textPrimary
+                                )
+                            )
+                        },
+                        confirmButton = {
+                            androidx.compose.material3.Button(onClick = { 
+                                viewModel.rejectPendingCommands(rejectFeedback)
+                                isRejecting = false
+                                rejectFeedback = ""
+                            }) {
+                                Text("ثبت و رد")
+                            }
+                        },
+                        dismissButton = {
+                            androidx.compose.material3.TextButton(onClick = { 
+                                viewModel.rejectPendingCommands()
+                                isRejecting = false
+                                rejectFeedback = ""
+                            }) {
+                                Text("رد بدون دلیل")
+                            }
+                        }
+                    )
+                } else {
+                    androidx.compose.material3.AlertDialog(
+                        onDismissRequest = { isRejecting = true },
+                        containerColor = colors.surface,
+                        titleContentColor = colors.textPrimary,
+                        textContentColor = colors.textSecondary,
+                        title = { Text("تأیید کارهای جدید", fontWeight = FontWeight.Bold) },
+                        text = {
+                            LazyColumn {
+                                items(pendingCommands!!.size) { i ->
+                                    val cmd = pendingCommands!![i]
+                                    val actionName = when (cmd.command) {
+                                        "ADD_TASK" -> "افزودن تسک: "
+                                        "UPDATE_TASK" -> "بروزرسانی تسک: "
+                                        "COMPLETE_TASK" -> "تکمیل تسک: "
+                                        "DELETE_TASK" -> "حذف تسک: "
+                                        else -> "اکشن: "
+                                    }
+                                    Text("${i + 1}. $actionName${cmd.title.ifEmpty { cmd.command }}", modifier = Modifier.padding(bottom = 8.dp))
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            androidx.compose.material3.Button(onClick = { viewModel.acceptPendingCommands() }) {
+                                Text("آره، انجامش بده")
+                            }
+                        },
+                        dismissButton = {
+                            androidx.compose.material3.TextButton(onClick = { isRejecting = true }) {
+                                Text("نه، رد کن")
+                            }
+                        }
+                    )
+                }
+            } else {
+                if (isRejecting) isRejecting = false
             }
         }
         }
@@ -275,11 +376,15 @@ fun DockItem(icon: ImageVector, isActive: Boolean, colors: ThemeColors, onClick:
 // ===================================
 // DASHBOARD SCREEN
 // ===================================
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(viewModel: TaskViewModel, colors: ThemeColors, onNavigate: (AppScreen) -> Unit) {
     val tasks by viewModel.filteredAndSortedTasks.collectAsStateWithLifecycle()
     val allTasks by viewModel.allTasks.collectAsStateWithLifecycle()
     val statusFilter by viewModel.statusFilter.collectAsStateWithLifecycle()
+    
+    val unreadNotificationsCount by viewModel.unreadNotificationsCount.collectAsStateWithLifecycle()
+    val allNotifications by viewModel.allNotifications.collectAsStateWithLifecycle()
     
     var searchQuery by remember { mutableStateOf("") }
     var expandNotifications by remember { mutableStateOf(false) }
@@ -290,14 +395,22 @@ fun DashboardScreen(viewModel: TaskViewModel, colors: ThemeColors, onNavigate: (
 
     val pendingCount = allTasks.count { it.status == "Pending" }
     
-    // Group tasks by folder (null/empty becomes "بدون فولدر")
-    val groupedTasks = filteredBySearch.groupBy { 
-        if (it.folderName.isNullOrBlank()) "بدون فولدر" else it.folderName
+    val allAvailableFolders = remember(tasks) {
+        tasks.mapNotNull { it.folderName.takeIf { f -> !f.isNullOrBlank() } }.distinct()
+    }
+    var selectedFolders by remember { mutableStateOf(emptySet<String>()) }
+    
+    val filteredBySearchAndFolder = filteredBySearch.filter {
+        if (selectedFolders.isEmpty()) true
+        else {
+            val fName = it.folderName
+            if (fName.isNullOrBlank()) selectedFolders.contains("بدون فولدر") else selectedFolders.contains(fName)
+        }
     }
     
-    // Notifications logic (Mocking urgent/overdue)
-    val notifications = allTasks.filter {
-        it.status == "Pending" && it.deadline > 0 && (it.deadline - System.currentTimeMillis() < 86400000L * 2) // within 2 days
+    // Group tasks by folder (null/empty becomes "بدون فولدر")
+    val groupedTasks = filteredBySearchAndFolder.groupBy { 
+        if (it.folderName.isNullOrBlank()) "بدون فولدر" else it.folderName!!
     }
     
     Box(modifier = Modifier.fillMaxSize()) {
@@ -341,7 +454,7 @@ fun DashboardScreen(viewModel: TaskViewModel, colors: ThemeColors, onNavigate: (
                             Icon(Icons.Default.Add, contentDescription = "Add Task", tint = colors.textPrimary)
                         }
                         
-                        // Bell with Badge
+                        // Bell with Badge with dynamic real SQLite unread count
                         Box(
                             modifier = Modifier
                                 .size(48.dp)
@@ -352,15 +465,23 @@ fun DashboardScreen(viewModel: TaskViewModel, colors: ThemeColors, onNavigate: (
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(Icons.Default.Notifications, contentDescription = "Notifications", tint = colors.textPrimary)
-                            if (notifications.isNotEmpty()) {
+                            if (unreadNotificationsCount > 0) {
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.TopEnd)
-                                        .offset(x = (-4).dp, y = 4.dp)
-                                        .size(10.dp)
+                                        .offset(x = (-2).dp, y = 2.dp)
+                                        .size(18.dp)
                                         .clip(CircleShape)
-                                        .background(Color.Red)
-                                )
+                                        .background(Color.Red),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "$unreadNotificationsCount",
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
                         }
                     }
@@ -393,6 +514,46 @@ fun DashboardScreen(viewModel: TaskViewModel, colors: ThemeColors, onNavigate: (
             }
             
             item { Spacer(modifier = Modifier.height(24.dp)) }
+
+            // FOLDER FILTERS
+            if (allAvailableFolders.isNotEmpty()) {
+                item {
+                    Row(
+                        modifier = Modifier
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 24.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val allFoldersWithNone = listOf("بدون فولدر") + allAvailableFolders
+                        for (folder in allFoldersWithNone) {
+                            val isSelected = selectedFolders.contains(folder)
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = {
+                                    selectedFolders = if (isSelected) {
+                                        selectedFolders - folder
+                                    } else {
+                                        selectedFolders + folder
+                                    }
+                                },
+                                label = { Text(folder, fontWeight = FontWeight.Medium) },
+                                colors = androidx.compose.material3.FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = colors.taskColors[4].copy(alpha = 0.2f),
+                                    selectedLabelColor = colors.textPrimary,
+                                    labelColor = colors.textSecondary
+                                ),
+                                shape = RoundedCornerShape(16.dp),
+                                border = androidx.compose.material3.FilterChipDefaults.filterChipBorder(
+                                    enabled = true,
+                                    selected = isSelected,
+                                    borderColor = if (isSelected) colors.taskColors[4] else colors.textSecondary.copy(alpha=0.3f)
+                                )
+                            )
+                        }
+                    }
+                }
+                item { Spacer(modifier = Modifier.height(16.dp)) }
+            }
 
             // SORT MODES
             item {
@@ -454,7 +615,7 @@ fun DashboardScreen(viewModel: TaskViewModel, colors: ThemeColors, onNavigate: (
                         val onCardColor = colors.onTaskColors.getOrNull(task.colorIndex) ?: colors.onTaskColors[0]
                         
                         Box(modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)) {
-                            AnimatedTaskCard(task, cardColor, onCardColor, colors, onNavigate = { onNavigate(AppScreen.AddEdit(task)) }, onToggle = { viewModel.toggleTaskComplete(task) })
+                            AnimatedTaskCard(task, cardColor, onCardColor, colors, onNavigate = { onNavigate(AppScreen.TaskDetail(task)) }, onToggle = { viewModel.toggleTaskComplete(task) })
                         }
                     }
                     
@@ -463,7 +624,7 @@ fun DashboardScreen(viewModel: TaskViewModel, colors: ThemeColors, onNavigate: (
             }
         }
         
-        // Notifications Dropdown Mock (Overlay)
+        // Notifications Dropdown SQLite-backed container (Real list)
         AnimatedVisibility(
             visible = expandNotifications,
             enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
@@ -479,25 +640,96 @@ fun DashboardScreen(viewModel: TaskViewModel, colors: ThemeColors, onNavigate: (
                     .padding(20.dp)
             ) {
                 Column {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("یادآورها", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = colors.textPrimary)
-                        Icon(Icons.Default.Close, contentDescription = "Close", tint = colors.textSecondary, modifier = Modifier.clickable { expandNotifications = false })
+                    Row(
+                        modifier = Modifier.fillMaxWidth(), 
+                        horizontalArrangement = Arrangement.SpaceBetween, 
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("اعلان‌ها و یادآوری‌ها", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = colors.textPrimary)
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (allNotifications.any { !it.isRead }) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = "Mark all read",
+                                    tint = colors.taskColors[4],
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .clickable { viewModel.markAllNotificationsAsRead() }
+                                )
+                            }
+                            if (allNotifications.isNotEmpty()) {
+                                Icon(
+                                    imageVector = Icons.Default.Delete,
+                                    contentDescription = "Clear all",
+                                    tint = colors.textSecondary,
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .clickable { viewModel.clearAllNotifications() }
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close",
+                                tint = colors.textSecondary,
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .clickable { expandNotifications = false }
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.height(16.dp))
                     
-                    if (notifications.isEmpty()) {
-                        Text("شما پیامی ندارید.", color = colors.textSecondary, fontSize = 14.sp)
-                    } else {
-                        notifications.take(3).forEach { notifTask ->
-                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(Color.Red))
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Column {
-                                    Text("تسکی نیاز به توجه شما دارد!", color = colors.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                                    Text(notifTask.title, color = colors.textSecondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
+                    if (allNotifications.isEmpty()) {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(Icons.Default.Notifications, contentDescription = null, tint = colors.textSecondary.copy(alpha = 0.4f), modifier = Modifier.size(48.dp))
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text("هیچ اعلانی یافت نشد. همه کارات رو رواله! ⚡", color = colors.textSecondary, fontSize = 14.sp)
                             }
-                            HorizontalDivider(color = colors.surfaceVariant, thickness = 1.dp)
+                        }
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 300.dp)
+                                .verticalScroll(androidx.compose.foundation.rememberScrollState())
+                        ) {
+                            allNotifications.forEach { notif ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { viewModel.markNotificationAsRead(notif.id) }
+                                        .padding(vertical = 12.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (!notif.isRead) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(8.dp)
+                                                .clip(CircleShape)
+                                                .background(Color.Red)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                    }
+                                    
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(notif.title, color = colors.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(notif.body, color = colors.textSecondary, fontSize = 12.sp)
+                                    }
+                                    
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Mark read",
+                                        tint = if (notif.isRead) colors.textSecondary.copy(alpha=0.3f) else colors.taskColors[4],
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                                HorizontalDivider(color = colors.surfaceVariant.copy(alpha=0.5f), thickness = 1.dp)
+                            }
                         }
                     }
                 }
@@ -602,7 +834,7 @@ fun AnimatedTaskCard(task: Task, blockColor: Color, onBlockColor: Color, colors:
                     Box(
                         modifier = Modifier.clip(RoundedCornerShape(16.dp)).background(if(isDone) colors.surface else pillBg).padding(horizontal = 12.dp, vertical = 6.dp)
                     ) {
-                        val prioText = if(task.priorityScore > 75) "فوری" else if(task.priorityScore > 40) "عادی" else "پایین"
+                        val prioText = if((task.importanceScore + task.urgencyScore) / 2 > 75) "فوری" else if((task.importanceScore + task.urgencyScore) / 2 > 40) "عادی" else "پایین"
                         Text(prioText, color = if(isDone) colors.textPrimary else textColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
@@ -782,7 +1014,7 @@ fun ChatScreen(viewModel: TaskViewModel, colors: ThemeColors, onBack: () -> Unit
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = colors.textPrimary)
             }
             Spacer(modifier = Modifier.width(16.dp))
-            Text("رفیق هوشمندت", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = colors.textPrimary)
+            Text("برده", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = colors.textPrimary)
         }
 
         LazyColumn(
@@ -908,6 +1140,11 @@ fun SettingsScreen(
                 val json = viewModel.exportTasksToJson()
                 context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(json) }
                 Toast.makeText(context, "فایل با موفقیت ذخیره شد!", Toast.LENGTH_SHORT).show()
+                viewModel.addNotificationToHistoryAndTriggerSystem(
+                    title = "📤 پشتیبان‌گیری موفق فایل",
+                    body = "یک نسخه پشتیبان از کارهای شما به صورت فایل با موفقیت ذخیره شد، داشیییی! ⚡",
+                    type = "success"
+                )
             } catch (e: Exception) {
                 Toast.makeText(context, "خطا در ذخیره فایل", Toast.LENGTH_SHORT).show()
             }
@@ -984,6 +1221,11 @@ fun SettingsScreen(
                             val json = viewModel.exportTasksToJson()
                             clipboardManager.setText(AnnotatedString(json))
                             Toast.makeText(context, "اطلاعات کپی شد!", Toast.LENGTH_SHORT).show()
+                            viewModel.addNotificationToHistoryAndTriggerSystem(
+                                title = "📋 کپی کدهای پشتیبان",
+                                body = "کدهای پشتیبان تفصیلی تسک‌هایت در حافظه موقت کپی شد، داشیییی! ⚡",
+                                type = "success"
+                            )
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.2f)),
                         modifier = Modifier.weight(1f)
@@ -1048,6 +1290,7 @@ fun SettingsScreen(
 // ===================================
 // ADD / EDIT SCREEN
 // ===================================
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun AddEditScreen(taskToEdit: Task?, viewModel: TaskViewModel, colors: ThemeColors, onBack: () -> Unit) {
     var title by remember { mutableStateOf(taskToEdit?.title ?: "") }
@@ -1056,7 +1299,10 @@ fun AddEditScreen(taskToEdit: Task?, viewModel: TaskViewModel, colors: ThemeColo
     var emoji by remember { mutableStateOf(taskToEdit?.emoji ?: "📝") }
     var folderName by remember { mutableStateOf(taskToEdit?.folderName ?: "") }
     var colorIndex by remember { mutableStateOf(taskToEdit?.colorIndex ?: 0) }
-    var deadlineMode by remember { mutableStateOf(false) }
+    var deadlineMode by remember { mutableStateOf(if (taskToEdit != null && taskToEdit.deadline > 0L) true else false) }
+    var deadlineTimestamp by remember { mutableStateOf(taskToEdit?.deadline ?: 0L) }
+    var importanceScore by remember { mutableStateOf(taskToEdit?.importanceScore?.toFloat() ?: 50f) }
+    var urgencyScore by remember { mutableStateOf(taskToEdit?.urgencyScore?.toFloat() ?: 50f) }
 
     val initialSubtasks = description.split("\n").filter { it.isNotBlank() }
     val subtasks = remember { androidx.compose.runtime.mutableStateListOf<String>().apply { addAll(initialSubtasks) } }
@@ -1065,10 +1311,18 @@ fun AddEditScreen(taskToEdit: Task?, viewModel: TaskViewModel, colors: ThemeColo
     var showTimeSheet by remember { mutableStateOf(false) }
     var showFolderSheet by remember { mutableStateOf(false) }
 
+    val timeSheetState = androidx.compose.material3.rememberModalBottomSheetState(
+        skipPartiallyExpanded = true
+    )
+    val folderSheetState = androidx.compose.material3.rememberModalBottomSheetState(
+        skipPartiallyExpanded = true
+    )
+
     @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
     if (showTimeSheet) {
         androidx.compose.material3.ModalBottomSheet(
             onDismissRequest = { showTimeSheet = false },
+            sheetState = timeSheetState,
             containerColor = colors.bg
         ) {
             var timeTab by remember { mutableStateOf(if (deadlineMode) 1 else 0) }
@@ -1087,7 +1341,7 @@ fun AddEditScreen(taskToEdit: Task?, viewModel: TaskViewModel, colors: ThemeColo
                             .weight(1f)
                             .clip(RoundedCornerShape(12.dp))
                             .background(if (timeTab == 0) colors.taskColors[4] else Color.Transparent)
-                            .clickable { timeTab = 0; deadlineMode = false }
+                            .clickable { timeTab = 0 }
                             .padding(vertical = 12.dp),
                         contentAlignment = Alignment.Center
                     ) {
@@ -1103,7 +1357,7 @@ fun AddEditScreen(taskToEdit: Task?, viewModel: TaskViewModel, colors: ThemeColo
                             .weight(1f)
                             .clip(RoundedCornerShape(12.dp))
                             .background(if (timeTab == 1) colors.taskColors[4] else Color.Transparent)
-                            .clickable { timeTab = 1; deadlineMode = true }
+                            .clickable { timeTab = 1 }
                             .padding(vertical = 12.dp),
                         contentAlignment = Alignment.Center
                     ) {
@@ -1116,293 +1370,501 @@ fun AddEditScreen(taskToEdit: Task?, viewModel: TaskViewModel, colors: ThemeColo
                     }
                 }
                 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Apple/Google Slate No-Time-Limit alternative button for unconstrained actions
+                androidx.compose.material3.Button(
+                    onClick = {
+                        durationText = "بدون زمان مشخص"
+                        deadlineMode = false
+                        deadlineTimestamp = 0L
+                        showTimeSheet = false
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = colors.surface.copy(alpha = 0.5f)
+                    ),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = null,
+                            tint = colors.textPrimary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "بدون زمان مشخص (تسک بدون ددلاین)",
+                            color = colors.textPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
                 
                 if (timeTab == 0) {
-                    // DURATION PRESETS & INCREMENTERS
+                    // DURATION - APPLE-STYLE SCROLL WHEEL PICKERS
                     var dDays by remember { mutableStateOf(0) }
-                    var dHours by remember { mutableStateOf(2) }
-                    
-                    Text("مدت زمان پیشنهادی یا دلخواه خود را تعیین کنید:", color = colors.textSecondary, fontSize = 14.sp)
-                    Spacer(modifier = Modifier.height(16.dp))
-                    
-                    // Prest Cards
+                    var dHours by remember { mutableStateOf(1) }
+                    var dMinutes by remember { mutableStateOf(30) }
+
+                    Text(
+                        text = "مدت زمان مورد نیاز برای انجام تسک را مشخص کنید:",
+                        color = colors.textSecondary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(bottom = 16.dp)
+                    )
+
+                    // Display columns side by side
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 20.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(colors.surface)
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        listOf("۳۰ د", "۱ س", "۲ س", "۴ س", "۱ روز", "۳ روز").forEach { label ->
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(colors.surface)
-                                    .clickable {
-                                        when (label) {
-                                            "۳۰ د" -> { dDays = 0; dHours = 0; durationText = "۳۰ دقیقه"; showTimeSheet = false }
-                                            "۱ س" -> { dDays = 0; dHours = 1 }
-                                            "۲ س" -> { dDays = 0; dHours = 2 }
-                                            "۴ س" -> { dDays = 0; dHours = 4 }
-                                            "۱ روز" -> { dDays = 1; dHours = 0 }
-                                            "۳ روز" -> { dDays = 3; dHours = 0 }
-                                        }
-                                    }
-                                    .padding(vertical = 10.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(label, color = colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                            }
+                        // Days picker
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                "روز",
+                                color = colors.textSecondary,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                            val daysList = (0..30).map { "$it" }
+                            WheelPicker(
+                                items = daysList,
+                                initialIndex = dDays,
+                                onIndexSelected = { dDays = it },
+                                textColor = colors.textPrimary,
+                                selectedColor = colors.taskColors[4],
+                                isLoop = false
+                            )
+                        }
+
+                        // Hours picker
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                "ساعت",
+                                color = colors.textSecondary,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                            val hoursList = (0..23).map { "$it" }
+                            WheelPicker(
+                                items = hoursList,
+                                initialIndex = dHours,
+                                onIndexSelected = { dHours = it },
+                                textColor = colors.textPrimary,
+                                selectedColor = colors.taskColors[4],
+                                isLoop = true
+                            )
+                        }
+
+                        // Minutes picker
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                "دقیقه",
+                                color = colors.textSecondary,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                            val minutesList = (0..59).map { "$it" }
+                            WheelPicker(
+                                items = minutesList,
+                                initialIndex = dMinutes,
+                                onIndexSelected = { dMinutes = it },
+                                textColor = colors.textPrimary,
+                                selectedColor = colors.taskColors[4],
+                                isLoop = true
+                            )
                         }
                     }
-                    
-                    // Incrementers Layout
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        // Days selector
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("روزها", color = colors.textPrimary, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(colors.surface).padding(8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(
-                                    modifier = Modifier.size(36.dp).clip(CircleShape).background(colors.bg).clickable { if (dDays > 0) dDays-- },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text("-", color = colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                                }
-                                Text("$dDays", color = colors.textPrimary, fontWeight = FontWeight.Black, fontSize = 18.sp)
-                                Box(
-                                    modifier = Modifier.size(36.dp).clip(CircleShape).background(colors.bg).clickable { dDays++ },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text("+", color = colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                                }
+
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    // Live Preview description of the selected duration
+                    val durationPreview = remember(dDays, dHours, dMinutes) {
+                        buildString {
+                            if (dDays > 0) append("$dDays روز")
+                            if (dHours > 0) {
+                                if (isNotEmpty()) append(" و ")
+                                append("$dHours ساعت")
                             }
-                        }
-                        
-                        // Hours selector
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("ساعت‌ها", color = colors.textPrimary, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(colors.surface).padding(8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(
-                                    modifier = Modifier.size(36.dp).clip(CircleShape).background(colors.bg).clickable { if (dHours > 0) dHours-- },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text("-", color = colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                                }
-                                Text("$dHours", color = colors.textPrimary, fontWeight = FontWeight.Black, fontSize = 18.sp)
-                                Box(
-                                    modifier = Modifier.size(36.dp).clip(CircleShape).background(colors.bg).clickable { if (dHours < 23) dHours++ },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text("+", color = colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                                }
+                            if (dMinutes > 0) {
+                                if (isNotEmpty()) append(" و ")
+                                append("$dMinutes دقیقه")
                             }
+                            if (isEmpty()) append("۳۰ دقیقه")
                         }
                     }
-                    
-                    Spacer(modifier = Modifier.height(32.dp))
-                    
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(colors.taskColors[4].copy(alpha = 0.1f))
+                            .padding(12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "مدت برگزیده: $durationPreview",
+                            color = colors.textPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(24.dp))
+
                     androidx.compose.material3.Button(
                         onClick = {
-                            val txt = buildString {
-                                if (dDays > 0) append("$dDays روز")
-                                if (dHours > 0) {
-                                    if (isNotEmpty()) append(" و ")
-                                    append("$dHours ساعت")
-                                }
-                                if (isEmpty()) append("۳۰ دقیقه")
-                            }
-                            durationText = txt
+                            durationText = durationPreview
+                            deadlineMode = false
                             showTimeSheet = false
                         },
-                        modifier = Modifier.fillMaxWidth().height(52.dp),
-                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = colors.taskColors[4]),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                            containerColor = colors.taskColors[4]
+                        ),
                         shape = RoundedCornerShape(16.dp)
                     ) {
-                        Text("تنظیم مدت انجام", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text(
+                            "تنظیم مدت انجام",
+                            color = Color.Black,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
+                        )
                     }
                 } else {
-                    // IRANIAN (SHAMSI) CALENDAR WIZARD
-                    var dateStep by remember { mutableStateOf(0) } // 0 = Date, 1 = Time
-                    var selectedYear by remember { mutableStateOf(1405) }
-                    var selectedMonth by remember { mutableStateOf("خرداد") }
-                    var selectedDay by remember { mutableStateOf(10) }
+                    // IRANIAN (SHAMSI) CALENDAR GRID VIEW - BEAUTIFUL, MODERN, UNIFIED
+                    val todayShamsi = remember { getCurrentShamsiDate() }
+                    val currentShamsiYear = todayShamsi.first
+                    val currentShamsiMonthIdx = (todayShamsi.second - 1).coerceIn(0, 11)
+                    val currentShamsiDay = todayShamsi.third
+
+                    var selectedYear by remember { mutableStateOf(currentShamsiYear) }
+                    var selectedMonthIndex by remember { mutableStateOf(currentShamsiMonthIdx) }
+                    var selectedDay by remember { mutableStateOf(currentShamsiDay) }
                     var selectedHour by remember { mutableStateOf(12) }
                     var selectedMinute by remember { mutableStateOf(0) }
-                    
+
                     val shamsiMonths = remember {
                         listOf("فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند")
                     }
-                    
-                    if (dateStep == 0) {
-                        // DATE SELECTOR STEP
-                        Text("مرحله ۱: انتخاب روز و ماه شمسی", color = colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Spacer(modifier = Modifier.height(16.dp))
-                        
-                        // Year Toggle
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(1405, 1406, 1407).forEach { year ->
+                    val selectedMonthName = shamsiMonths[selectedMonthIndex]
+
+                    // Calculate shamsi leap year
+                    fun isShamsiLeapYear(y: Int): Boolean {
+                        val r = (y - 474) % 2820
+                        val l = (r + 38) * 31 % 128
+                        return l < 31
+                    }
+
+                    // Get total days in month
+                    val daysInSelectedMonth = when {
+                        selectedMonthIndex < 6 -> 31
+                        selectedMonthIndex < 11 -> 30
+                        else -> if (isShamsiLeapYear(selectedYear)) 30 else 29
+                    }
+
+                    // Get first day weekday offset (0 = Sat, ..., 6 = Fri)
+                    fun getFirstDayWeekday(y: Int, m: Int): Int {
+                        val converter = com.example.ui.utils.JalaliDateConverter()
+                        val gregorianTime = converter.jalaliToGregorian(y, m, 1)
+                        val c = java.util.Calendar.getInstance().apply {
+                            timeInMillis = gregorianTime
+                        }
+                        return when (c.get(java.util.Calendar.DAY_OF_WEEK)) {
+                            java.util.Calendar.SATURDAY -> 0
+                            java.util.Calendar.SUNDAY -> 1
+                            java.util.Calendar.MONDAY -> 2
+                            java.util.Calendar.TUESDAY -> 3
+                            java.util.Calendar.WEDNESDAY -> 4
+                            java.util.Calendar.THURSDAY -> 5
+                            java.util.Calendar.FRIDAY -> 6
+                            else -> 0
+                        }
+                    }
+
+                    val firstDayOffset = remember(selectedYear, selectedMonthIndex) {
+                        getFirstDayWeekday(selectedYear, selectedMonthIndex + 1)
+                    }
+
+                    // Reset selectedDay if it's out of range for the new month
+                    LaunchedEffect(daysInSelectedMonth) {
+                        if (selectedDay > daysInSelectedMonth) {
+                            selectedDay = daysInSelectedMonth
+                        }
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                    ) {
+                        // Month & Year Selector Banner
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            androidx.compose.material3.IconButton(
+                                onClick = {
+                                    if (selectedMonthIndex > 0) {
+                                        selectedMonthIndex--
+                                    } else {
+                                        selectedMonthIndex = 11
+                                        selectedYear--
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ArrowForward,
+                                    contentDescription = "Previous Month",
+                                    tint = colors.textPrimary
+                                )
+                            }
+
+                            Text(
+                                text = "$selectedMonthName $selectedYear",
+                                color = colors.textPrimary,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            androidx.compose.material3.IconButton(
+                                onClick = {
+                                    if (selectedMonthIndex < 11) {
+                                        selectedMonthIndex++
+                                    } else {
+                                        selectedMonthIndex = 0
+                                        selectedYear++
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ArrowBack,
+                                    contentDescription = "Next Month",
+                                    tint = colors.textPrimary
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Weekdays Grid Header
+                        val weekdays = listOf("ش", "ی", "د", "س", "چ", "پ", "ج")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            weekdays.forEach { dayName ->
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(if (selectedYear == year) colors.taskColors[4] else colors.surface)
-                                        .clickable { selectedYear = year }
-                                        .padding(vertical = 10.dp),
+                                        .padding(vertical = 4.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text("$year", color = if (selectedYear == year) Color.Black else colors.textPrimary, fontWeight = FontWeight.Bold)
+                                    Text(
+                                        text = dayName,
+                                        color = if (dayName == "ج") colors.taskColors[1] else colors.textSecondary,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
                         }
-                        
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text("ماه", color = colors.textSecondary, fontSize = 13.sp)
+
                         Spacer(modifier = Modifier.height(8.dp))
-                        
-                        // Months Grid (4 columns, 3 rows)
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            for (row in 0 until 3) {
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    for (col in 0 until 4) {
-                                        val idx = row * 4 + col
-                                        val mName = shamsiMonths[idx]
-                                        Box(
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .clip(RoundedCornerShape(10.dp))
-                                                .background(if (selectedMonth == mName) colors.taskColors[4].copy(alpha = 0.5f) else colors.surface)
-                                                .border(2.dp, if (selectedMonth == mName) colors.taskColors[4] else Color.Transparent, RoundedCornerShape(10.dp))
-                                                .clickable { selectedMonth = mName }
-                                                .padding(vertical = 8.dp),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text(mName, color = colors.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+
+                        // Calendar Grid Days Builder (Max 6 rows of 7 days)
+                        val totalCells = firstDayOffset + daysInSelectedMonth
+                        val totalRows = (totalCells + 6) / 7
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            for (rowIndex in 0 until totalRows) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    for (colIndex in 0 until 7) {
+                                        val cellIndex = rowIndex * 7 + colIndex
+                                        if (cellIndex < firstDayOffset || cellIndex >= totalCells) {
+                                            // Empty cell
+                                            Box(modifier = Modifier.weight(1f).aspectRatio(1.2f))
+                                        } else {
+                                            val dayNumber = cellIndex - firstDayOffset + 1
+                                            val isSelected = selectedDay == dayNumber
+                                            val isToday = currentShamsiYear == selectedYear &&
+                                                    currentShamsiMonthIdx == selectedMonthIndex &&
+                                                    currentShamsiDay == dayNumber
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .aspectRatio(1.2f)
+                                                    .padding(2.dp)
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(
+                                                        if (isSelected) colors.taskColors[4] else Color.Transparent
+                                                    )
+                                                    .clickable {
+                                                        selectedDay = dayNumber
+                                                    }
+                                                    .border(
+                                                        width = if (isToday && !isSelected) 1.5.dp else 0.dp,
+                                                        color = if (isToday) colors.taskColors[4].copy(alpha=0.6f) else Color.Transparent,
+                                                        shape = RoundedCornerShape(12.dp)
+                                                    ),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(
+                                                    text = "$dayNumber",
+                                                    color = if (isSelected) Color.Black else colors.textPrimary,
+                                                    fontSize = 14.sp,
+                                                    fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.Medium
+                                                )
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text("روز", color = colors.textSecondary, fontSize = 13.sp)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        
-                        // Days Row
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth()
+
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                        // Unified Clock Selector Under the Calendar
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(colors.surface)
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            items(31) { index ->
-                                val dayNum = index + 1
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Schedule,
+                                    contentDescription = null,
+                                    tint = colors.taskColors[4],
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "تنظیم ساعت مهلت:",
+                                    color = colors.textSecondary,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                // Hour Wheel Picker Box
                                 Box(
                                     modifier = Modifier
-                                        .size(40.dp)
-                                        .clip(CircleShape)
-                                        .background(if (selectedDay == dayNum) colors.taskColors[4] else colors.surface)
-                                        .clickable { selectedDay = dayNum },
+                                        .width(70.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(colors.bg.copy(alpha=0.6f)),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text("$dayNum", color = if (selectedDay == dayNum) Color.Black else colors.textPrimary, fontWeight = FontWeight.Bold)
+                                    val hoursList = (0..23).map { String.format("%02d", it) }
+                                    WheelPicker(
+                                        items = hoursList,
+                                        initialIndex = selectedHour,
+                                        onIndexSelected = { selectedHour = hoursList[it].toInt() },
+                                        itemHeight = 32.dp,
+                                        visibleItemsCount = 1,
+                                        textColor = colors.textPrimary,
+                                        selectedColor = colors.taskColors[4],
+                                        isLoop = true
+                                    )
+                                }
+
+                                Text(":", color = colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+
+                                // Minute Wheel Picker Box
+                                Box(
+                                    modifier = Modifier
+                                        .width(70.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(colors.bg.copy(alpha=0.6f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    val minutesList = (0..59).map { String.format("%02d", it) }
+                                    WheelPicker(
+                                        items = minutesList,
+                                        initialIndex = selectedMinute,
+                                        onIndexSelected = { selectedMinute = minutesList[it].toInt() },
+                                        itemHeight = 32.dp,
+                                        visibleItemsCount = 1,
+                                        textColor = colors.textPrimary,
+                                        selectedColor = colors.taskColors[4],
+                                        isLoop = true
+                                    )
                                 }
                             }
                         }
-                        
+
                         Spacer(modifier = Modifier.height(24.dp))
-                        
+
+                        // Submit Button
                         androidx.compose.material3.Button(
-                            onClick = { dateStep = 1 },
-                            modifier = Modifier.fillMaxWidth().height(52.dp),
-                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = colors.taskColors[4]),
+                            onClick = {
+                                durationText = "$selectedDay $selectedMonthName $selectedYear ساعت $selectedHour:${String.format("%02d", selectedMinute)}"
+                                deadlineMode = true
+                                val finalTs = com.example.ui.utils.JalaliDateConverter().jalaliToGregorian(
+                                    selectedYear,
+                                    selectedMonthIndex + 1,
+                                    selectedDay
+                                )
+                                val cal = java.util.Calendar.getInstance().apply {
+                                    timeInMillis = finalTs
+                                    set(java.util.Calendar.HOUR_OF_DAY, selectedHour)
+                                    set(java.util.Calendar.MINUTE, selectedMinute)
+                                    set(java.util.Calendar.SECOND, 0)
+                                }
+                                deadlineTimestamp = cal.timeInMillis
+                                showTimeSheet = false
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp),
+                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                containerColor = colors.taskColors[4]
+                            ),
                             shape = RoundedCornerShape(16.dp)
                         ) {
-                            Text("بعدی: تنظیم ساعت ➔", color = Color.Black, fontWeight = FontWeight.Bold)
-                        }
-                    } else {
-                        // TIME SELECTOR STEP
-                        Text("مرحله ۲: تنظیم ساعت و دقیقه", color = colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Spacer(modifier = Modifier.height(24.dp))
-                        
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                            // Hour Picker
-                            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("ساعت", color = colors.textSecondary, modifier = Modifier.padding(bottom = 8.dp))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(colors.surface).padding(12.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(
-                                        modifier = Modifier.size(36.dp).clip(CircleShape).background(colors.bg).clickable { if (selectedHour > 0) selectedHour-- },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text("-", color = colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                                    }
-                                    Text(String.format("%02d", selectedHour), color = colors.textPrimary, fontWeight = FontWeight.Black, fontSize = 22.sp)
-                                    Box(
-                                        modifier = Modifier.size(36.dp).clip(CircleShape).background(colors.bg).clickable { if (selectedHour < 23) selectedHour++ },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text("+", color = colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                                    }
-                                }
-                            }
-                            
-                            // Minute Picker
-                            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("دقیقه", color = colors.textSecondary, modifier = Modifier.padding(bottom = 8.dp))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(colors.surface).padding(12.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(
-                                        modifier = Modifier.size(36.dp).clip(CircleShape).background(colors.bg).clickable { if (selectedMinute >= 5) selectedMinute -= 5 },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text("-", color = colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                                    }
-                                    Text(String.format("%02d", selectedMinute), color = colors.textPrimary, fontWeight = FontWeight.Black, fontSize = 22.sp)
-                                    Box(
-                                        modifier = Modifier.size(36.dp).clip(CircleShape).background(colors.bg).clickable { if (selectedMinute <= 50) selectedMinute += 5 },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text("+", color = colors.textPrimary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                                    }
-                                }
-                            }
-                        }
-                        
-                        Spacer(modifier = Modifier.height(32.dp))
-                        
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            androidx.compose.material3.Button(
-                                onClick = { dateStep = 0 },
-                                modifier = Modifier.weight(1f).height(52.dp),
-                                colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = colors.surface),
-                                shape = RoundedCornerShape(16.dp)
-                            ) {
-                                Text("❮ برگشت", color = colors.textPrimary, fontWeight = FontWeight.Bold)
-                            }
-                            
-                            androidx.compose.material3.Button(
-                                onClick = {
-                                    durationText = "$selectedDay $selectedMonth $selectedYear ساعت $selectedHour:${String.format("%02d", selectedMinute)}"
-                                    deadlineMode = true
-                                    showTimeSheet = false
-                                },
-                                modifier = Modifier.weight(1.5f).height(52.dp),
-                                colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = colors.taskColors[4]),
-                                shape = RoundedCornerShape(16.dp)
-                            ) {
-                                Text("تایید نهایی ددلاین", color = Color.Black, fontWeight = FontWeight.Bold)
-                            }
+                            Text("تایید نهایی ددلاین", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                         }
                     }
                 }
@@ -1415,6 +1877,7 @@ fun AddEditScreen(taskToEdit: Task?, viewModel: TaskViewModel, colors: ThemeColo
     if (showFolderSheet) {
         androidx.compose.material3.ModalBottomSheet(
             onDismissRequest = { showFolderSheet = false },
+            sheetState = folderSheetState,
             containerColor = colors.bg
         ) {
             val allFolders by viewModel.allTasks.collectAsStateWithLifecycle()
@@ -1656,6 +2119,38 @@ fun AddEditScreen(taskToEdit: Task?, viewModel: TaskViewModel, colors: ThemeColo
                 }
             }
 
+            Spacer(modifier = Modifier.height(24.dp))
+            
+            // Priority Slider
+            Text("امتیاز اهمیت (۰ تا ۱۰۰): ${importanceScore.toInt()}", color = colors.textPrimary, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
+            androidx.compose.material3.Slider(
+                value = importanceScore,
+                onValueChange = { importanceScore = it },
+                valueRange = 0f..100f,
+                colors = androidx.compose.material3.SliderDefaults.colors(
+                    thumbColor = colors.taskColors[colorIndex],
+                    activeTrackColor = colors.taskColors[colorIndex],
+                    inactiveTrackColor = colors.surface
+                ),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Urgency Slider
+            Text("امتیاز فوریت (۰ تا ۱۰۰): ${urgencyScore.toInt()}", color = colors.textPrimary, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
+            androidx.compose.material3.Slider(
+                value = urgencyScore,
+                onValueChange = { urgencyScore = it },
+                valueRange = 0f..100f,
+                colors = androidx.compose.material3.SliderDefaults.colors(
+                    thumbColor = colors.taskColors[colorIndex],
+                    activeTrackColor = colors.taskColors[colorIndex],
+                    inactiveTrackColor = colors.surface
+                ),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+            )
+
             Spacer(modifier = Modifier.height(20.dp))
             
             // Save Button
@@ -1671,8 +2166,9 @@ fun AddEditScreen(taskToEdit: Task?, viewModel: TaskViewModel, colors: ThemeColo
                             viewModel.addTaskManually(
                                 title = title, 
                                 description = finalDescription, 
-                                deadline = 0L, 
-                                priority = 50, 
+                                deadline = deadlineTimestamp, 
+                                priority = importanceScore.toInt(), 
+                                urgency = urgencyScore.toInt(),
                                 estimatedMinutes = 30, // Default estimate
                                 timeEstimateText = durationText,
                                 emoji = emoji.ifBlank { "📝" },
@@ -1687,7 +2183,10 @@ fun AddEditScreen(taskToEdit: Task?, viewModel: TaskViewModel, colors: ThemeColo
                                     timeEstimateText = durationText,
                                     emoji = emoji.ifBlank { "📝" },
                                     colorIndex = colorIndex,
-                                    folderName = folderName.takeIf { it.isNotBlank() }
+                                    folderName = folderName.takeIf { it.isNotBlank() },
+                                    deadline = deadlineTimestamp,
+                                    importanceScore = importanceScore.toInt(),
+                                    urgencyScore = urgencyScore.toInt()
                                 )
                             )
                         }
@@ -1725,3 +2224,146 @@ fun formatShortDate(timestamp: Long): String {
     val sdf = SimpleDateFormat("dd MMM", Locale.ENGLISH)
     return sdf.format(Date(timestamp))
 }
+
+// ===================================
+// CUSTOM DYNAMIC JALALI DATE CALCULATOR
+// ===================================
+fun getCurrentShamsiDate(): Triple<Int, Int, Int> {
+    val calendar = Calendar.getInstance()
+    val gYear = calendar.get(Calendar.YEAR)
+    val gMonth = calendar.get(Calendar.MONTH) + 1 // 1-12
+    val gDay = calendar.get(Calendar.DAY_OF_MONTH)
+
+    val gLeap = if ((gYear % 4 == 0 && gYear % 100 != 0) || (gYear % 400 == 0)) 1 else 0
+    val gDays = intArrayOf(0, 31, 28 + gLeap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    
+    var daysSinceJan1 = 0
+    for (i in 1 until gMonth) {
+         daysSinceJan1 += gDays[i]
+    }
+    daysSinceJan1 += gDay
+    
+    var sYear = gYear - 621
+    var sMonth = 1
+    var sDay = 1
+    
+    val farvardin1DayOfYear = if (gLeap == 1) { 81 } else { 80 }
+    
+    if (daysSinceJan1 >= farvardin1DayOfYear) {
+        val daysInShamsi = daysSinceJan1 - farvardin1DayOfYear + 1
+        if (daysInShamsi <= 186) {
+            sMonth = (daysInShamsi - 1) / 31 + 1
+            sDay = (daysInShamsi - 1) % 31 + 1
+        } else {
+            val remainingDays = daysInShamsi - 186
+            sMonth = (remainingDays - 1) / 30 + 7
+            sDay = (remainingDays - 1) % 30 + 1
+        }
+    } else {
+        sYear -= 1
+        val prevGLeap = if (((gYear - 1) % 4 == 0 && (gYear - 1) % 100 != 0) || ((gYear - 1) % 400 == 0)) 1 else 0
+        val totalDaysInPrevG = 365 + prevGLeap
+        val prevFarvardin1Day = if (prevGLeap == 1) { 81 } else { 80 }
+        val daysInShamsi = (totalDaysInPrevG - prevFarvardin1Day + 1) + daysSinceJan1
+        
+        if (daysInShamsi <= 186) {
+            sMonth = (daysInShamsi - 1) / 31 + 1
+            sDay = (daysInShamsi - 1) % 31 + 1
+        } else {
+            val remainingDays = daysInShamsi - 186
+            sMonth = (remainingDays - 1) / 30 + 7
+            sDay = (remainingDays - 1) % 30 + 1
+        }
+    }
+    return Triple(sYear, sMonth, sDay)
+}
+
+// ===================================
+// APPLE-STYLE CYLINDRICAL WHEEL PICKER
+// ===================================
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun WheelPicker(
+    items: List<String>,
+    initialIndex: Int,
+    onIndexSelected: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    visibleItemsCount: Int = 3,
+    itemHeight: androidx.compose.ui.unit.Dp = 45.dp,
+    label: String = "",
+    textColor: Color = Color.White,
+    selectedColor: Color = Color.Yellow,
+    isLoop: Boolean = true
+) {
+    if (items.isEmpty()) return
+
+    val itemsCount = if (isLoop) 10000 else items.size
+    val startIndex = if (isLoop) {
+        val middleOffset = itemsCount / 2
+        middleOffset - (middleOffset % items.size) + (initialIndex % items.size)
+    } else {
+        initialIndex.coerceIn(0, items.size - 1)
+    }
+
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = startIndex)
+    val flingBehavior = rememberSnapFlingBehavior(lazyListState = listState)
+    
+    val centerIndex by remember {
+        derivedStateOf {
+            val rawIdx = listState.firstVisibleItemIndex
+            if (isLoop) {
+                if (items.isNotEmpty()) rawIdx % items.size else 0
+            } else {
+                rawIdx.coerceIn(0, items.size - 1)
+            }
+        }
+    }
+
+    LaunchedEffect(centerIndex) {
+        onIndexSelected(centerIndex)
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(itemHeight * visibleItemsCount),
+        contentAlignment = Alignment.Center
+    ) {
+        // Selection highlight bar
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(itemHeight)
+                .background(selectedColor.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+                .border(1.dp, selectedColor.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+        )
+
+        LazyColumn(
+            state = listState,
+            flingBehavior = flingBehavior,
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(vertical = itemHeight * (visibleItemsCount / 2))
+        ) {
+            items(itemsCount) { index ->
+                val realIndex = if (isLoop) index % items.size else index
+                val isSelected = realIndex == centerIndex
+                
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(itemHeight),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = items[realIndex] + if (label.isNotBlank() && isSelected) " $label" else "",
+                        fontSize = if (isSelected) 19.sp else 15.sp,
+                        fontWeight = if (isSelected) FontWeight.Black else FontWeight.Medium,
+                        color = if (isSelected) selectedColor else textColor.copy(alpha = 0.35f),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+    }
+}
+
